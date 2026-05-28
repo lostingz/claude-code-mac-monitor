@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+*.dmg
+ClaudeMonitor.app/
+build-dmg/
+DerivedData/
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/

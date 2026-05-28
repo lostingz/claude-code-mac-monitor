@@ -1,0 +1,53 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Create app bundle
+        run: |
+          mkdir -p ClaudeMonitor.app/Contents/MacOS
+          mkdir -p ClaudeMonitor.app/Contents/Resources
+          cp .build/release/ClaudeMonitor ClaudeMonitor.app/Contents/MacOS/
+          cp Info.plist ClaudeMonitor.app/Contents/
+          cp Scripts/statusline-wrapper.sh ClaudeMonitor.app/Contents/Resources/
+          chmod +x ClaudeMonitor.app/Contents/Resources/statusline-wrapper.sh
+
+      - name: Code sign (ad-hoc)
+        run: codesign --force --deep --sign - ClaudeMonitor.app
+
+      - name: Create DMG
+        run: |
+          mkdir -p build-dmg
+          cp -R ClaudeMonitor.app build-dmg/
+          ln -s /Applications build-dmg/Applications
+          cp Scripts/uninstall.sh build-dmg/Uninstall.sh
+          cat > build-dmg/README.txt << 'EOF'
+          ClaudeMonitor - Claude Code Menu Bar Monitor
+          See https://github.com/${{ github.repository }} for docs.
+          EOF
+          hdiutil create -volname ClaudeMonitor -srcfolder build-dmg -ov -format UDZO ClaudeMonitor.dmg
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeMonitor
+          path: |
+            ClaudeMonitor.dmg
+            ClaudeMonitor.app
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ClaudeMonitor.dmg
+          generate_release_notes: true
