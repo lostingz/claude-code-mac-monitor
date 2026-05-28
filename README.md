@@ -22,8 +22,8 @@ macOS 菜单栏应用，实时监控 Claude Code 工作状态。
 ### 方式二：源码编译
 
 ```bash
-git clone https://github.com/lostingz/claude-code-mac-tool.git
-cd claude-code-mac-tool
+git clone https://github.com/lostingz/claude-code-mac-monitor.git
+cd claude-code-mac-monitor
 bash Scripts/build.sh
 open ClaudeMonitor.app
 ```
