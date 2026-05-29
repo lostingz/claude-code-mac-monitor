@@ -1,9 +1,28 @@
 import Foundation
 import Network
 
+private let debugLogFormatter = ISO8601DateFormatter()
+private let debugLogMaxBytes = 1_000_000
+private let debugLogLock = NSLock()
+
 func debugLog(_ msg: String) {
-    let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+    // debugLog is called from the hookserver queue, the main thread, and the approval
+    // timeout. Serialize the whole body: ISO8601DateFormatter is not thread-safe, and
+    // the size-check + rotation + write must be atomic to avoid a TOCTOU race.
+    debugLogLock.lock()
+    defer { debugLogLock.unlock() }
+
     let path = FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/monitor-debug.log"
+
+    // Size-based rotation: keep at most ~2MB (current + .1).
+    if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+       let size = attrs[.size] as? Int, size > debugLogMaxBytes {
+        let rotated = path + ".1"
+        try? FileManager.default.removeItem(atPath: rotated)
+        try? FileManager.default.moveItem(atPath: path, toPath: rotated)
+    }
+
+    let line = "[\(debugLogFormatter.string(from: Date()))] \(msg)\n"
     if let handle = FileHandle(forWritingAtPath: path) {
         handle.seekToEndOfFile()
         handle.write(line.data(using: .utf8)!)
@@ -18,6 +37,7 @@ final class HookServer {
     private let port: UInt16
     private let appState: AppState
     private let queue = DispatchQueue(label: "com.claudemonitor.hookserver")
+    private var startAttempts = 0
 
     init(port: UInt16 = 19806, appState: AppState) {
         self.port = port
@@ -28,7 +48,14 @@ final class HookServer {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
-            listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+            // Bind to the loopback interface only — Claude Code connects via 127.0.0.1.
+            // Without this, NWListener binds to all interfaces, exposing the hook server
+            // (and the approval dialogs it triggers) to the local network.
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(
+                host: "127.0.0.1",
+                port: NWEndpoint.Port(rawValue: port)!
+            )
+            listener = try NWListener(using: params)
         } catch {
             print("HookServer: failed to create listener: \(error)")
             return
@@ -38,15 +65,38 @@ final class HookServer {
             self?.handleConnection(connection)
         }
 
-        listener?.stateUpdateHandler = { state in
+        listener?.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
             switch state {
             case .ready:
-                print("HookServer: listening on port \(self.port)")
+                print("HookServer: listening on 127.0.0.1:\(self.port)")
+                self.startAttempts = 0
+            case .waiting(let error):
+                // EADDRINUSE typically surfaces here first on macOS. Don't spin.
+                if self.isAddrInUse(error) {
+                    self.reportPortInUse()
+                    self.listener?.cancel()
+                }
             case .failed(let error):
                 print("HookServer: failed: \(error)")
-                self.listener?.cancel()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                    self?.start()
+                if self.isAddrInUse(error) {
+                    self.reportPortInUse()
+                    self.listener?.cancel()
+                } else if self.startAttempts < 3 {
+                    self.startAttempts += 1
+                    self.listener?.cancel()
+                    self.queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                        self?.start()
+                    }
+                } else {
+                    self.listener?.cancel()
+                    let message = error.localizedDescription
+                    DispatchQueue.main.async {
+                        ClaudeMonitorApp.appState.setupResult = SetupResult(
+                            outcome: .failed,
+                            messages: ["Hook 监听启动失败: \(message)"]
+                        )
+                    }
                 }
             default:
                 break
@@ -56,9 +106,28 @@ final class HookServer {
         listener?.start(queue: queue)
     }
 
+    private func isAddrInUse(_ error: NWError) -> Bool {
+        if case .posix(let code) = error, code == .EADDRINUSE { return true }
+        return false
+    }
+
+    private func reportPortInUse() {
+        let p = port
+        DispatchQueue.main.async {
+            ClaudeMonitorApp.appState.setupResult = SetupResult(
+                outcome: .failed,
+                messages: ["端口 \(p) 已被占用，ClaudeMonitor 无法接收 Claude Code 的 hook 事件。请关闭占用该端口的进程后重启。"]
+            )
+        }
+    }
+
     func stop() {
         listener?.cancel()
         listener = nil
+        queue.async { [weak self] in
+            self?.pending.values.forEach { $0.timeout.cancel() }
+            self?.pending.removeAll()
+        }
     }
 
     private func handleConnection(_ connection: NWConnection) {
@@ -190,7 +259,14 @@ final class HookServer {
         sendResponse(connection: connection, statusCode: 200, body: "{}")
     }
 
-    private var pendingConnections: [UUID: NWConnection] = [:]
+    private struct Pending {
+        let connection: NWConnection
+        let timeout: DispatchWorkItem
+    }
+    private var pending: [UUID: Pending] = [:]
+
+    /// Just under Claude Code's 120s PermissionRequest hook timeout.
+    private static let approvalTimeout: TimeInterval = 115
 
     private func handlePermissionRequest(event: HookEvent, connection: NWConnection) {
         let toolName = event.toolName ?? "Unknown"
@@ -198,12 +274,15 @@ final class HookServer {
         let sessionId = event.sessionId ?? ""
         debugLog("[HookServer] PermissionRequest for: \(toolName)")
 
+        let id = UUID()
         let request = ApprovalRequest(
+            id: id,
             toolName: toolName,
             toolInput: toolInput,
             sessionId: sessionId,
             timestamp: Date()
         ) { [weak self] allowed in
+            guard let self else { return }
             debugLog("[HookServer] User decided: \(allowed ? "ALLOW" : "DENY")")
             let behavior = allowed ? "allow" : "deny"
             let response = PermissionResponse(
@@ -215,18 +294,39 @@ final class HookServer {
 
             if let jsonData = try? JSONEncoder().encode(response),
                let jsonStr = String(data: jsonData, encoding: .utf8) {
-                self?.sendResponse(connection: connection, statusCode: 200, body: jsonStr)
+                self.sendResponse(connection: connection, statusCode: 200, body: jsonStr)
             } else {
-                self?.sendResponse(connection: connection, statusCode: 200, body: "{}")
+                self.sendResponse(connection: connection, statusCode: 200, body: "{}")
+            }
+
+            self.queue.async {
+                self.pending[id]?.timeout.cancel()
+                self.pending.removeValue(forKey: id)
             }
 
             DispatchQueue.main.async {
-                self?.appState.status = .working
-                self?.appState.pendingApproval = nil
+                self.appState.status = .working
+                self.appState.pendingApproval = nil
             }
         }
 
-        pendingConnections[request.id] = connection
+        // Auto-deny if the user never responds, so the held connection and request
+        // don't linger until Claude Code's own hook timeout. hasResponded guards
+        // against a late user click double-completing.
+        let timeout = DispatchWorkItem { [weak request] in
+            debugLog("[HookServer] PermissionRequest timed out, auto-denying")
+            request?.completion(false)
+            DispatchQueue.main.async {
+                if ClaudeMonitorApp.appState.pendingApproval?.id == id {
+                    ClaudeMonitorApp.approvalWindowController?.window?.close()
+                }
+            }
+        }
+
+        queue.async { [weak self] in
+            self?.pending[id] = Pending(connection: connection, timeout: timeout)
+        }
+        queue.asyncAfter(deadline: .now() + HookServer.approvalTimeout, execute: timeout)
 
         DispatchQueue.main.async { [weak self] in
             self?.appState.status = .waitingApproval

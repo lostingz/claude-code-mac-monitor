@@ -64,6 +64,8 @@ final class AppState {
     var projectDir: String?
     var gitBranch: String?
 
+    var setupResult: SetupResult?
+
     var sessionDurationFormatted: String {
         guard let start = sessionStartTime else { return "--" }
         let elapsed = Date().timeIntervalSince(start)
@@ -149,9 +151,8 @@ final class AppState {
             toolHistory.removeAll()
 
         case "SessionEnd":
-            sessionActive = false
-            status = .inactive
-            sessionId = nil
+            // Clear all metrics/tool history so they don't leak into the next session's popover.
+            resetSession()
 
         case "Notification":
             break

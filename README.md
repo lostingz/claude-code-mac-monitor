@@ -32,9 +32,11 @@ open ClaudeMonitor.app
 
 应用首次启动时会自动完成以下配置，无需手动操作：
 
-1. 在 `~/.claude/settings.json` 中添加 HTTP hooks（PreToolUse、PostToolUse、PermissionRequest、Stop 等）
-2. 包装现有 statusline 脚本以读取 token/context 数据
-3. 备份原有 statusline 配置到 `~/.claude/statusline-command-original.sh`
+1. 在 `~/.claude/settings.json` 中添加 HTTP hooks（PreToolUse、PostToolUse、PermissionRequest、Stop 等）；若该文件不存在会自动创建
+2. 安装 statusline 脚本以读取 token/context 数据（即使此前未配置 statusline 也会安装）
+3. 修改前先把原 `settings.json` 备份为 `~/.claude/settings.json.bak`；若此前已有 statusline，其原配置另备份到 `~/.claude/statusline-command-original.sh`
+
+> 若 `settings.json` 存在但不是合法 JSON，应用不会改写它，并会在菜单栏面板顶部显示「SETUP FAILED」提示。
 
 **注意：hooks 在运行中的 Claude Code 会话不会立即生效，需要开启新会话。**
 
@@ -91,12 +93,28 @@ Sources/ClaudeMonitor/
 
 ## 卸载
 
-1. 退出 ClaudeMonitor
-2. 从 Applications 删除 `ClaudeMonitor.app`
-3. 清理 hooks（二选一）：
-   - 编辑 `~/.claude/settings.json`，删除所有包含 `"_tag": "ClaudeMonitor"` 的 hook 条目
-   - 或删除 `~/.claude/settings.json` 中 hooks 部分里 url 包含 `19806` 的条目
-4. 恢复 statusline：将 `~/.claude/statusline-command-original.sh` 重命名为 `~/.claude/statusline-command.sh`，并将 settings.json 中 statusLine.command 改回 `bash ~/.claude/statusline-command.sh`
+### 方式一（推荐）：自动脚本
+
+DMG 内附带 `Uninstall.sh`（源码为 `Scripts/uninstall.sh`），运行即可一键卸载：
+
+```bash
+bash Scripts/uninstall.sh
+```
+
+脚本会依次：退出 app → 从 `settings.json` 移除 ClaudeMonitor 的 hooks（按 url 含 `19806` 识别）→ 恢复原 statusline → 删除临时文件 → 从 `/Applications` 移除 app。
+
+### 方式二：手动
+
+1. 退出 ClaudeMonitor，并从 `Applications` 删除 `ClaudeMonitor.app`
+2. 清理 hooks：编辑 `~/.claude/settings.json`，删除 `hooks` 中 url 含 `19806` 的条目（这些条目同时带有 `"_tag": "ClaudeMonitor"` 标记）
+3. 恢复 statusline：
+   - 若此前配置过 statusline：把 `~/.claude/statusline-command-original.sh` 拷回 `~/.claude/statusline-command.sh`，并将 settings.json 中 `statusLine.command` 改回 `bash ~/.claude/statusline-command.sh`
+   - 若此前没有 statusline：删除 settings.json 中的 `statusLine` 字段即可
+4. 删除残留文件：`~/.claude/statusline-monitor.sh`、`~/.claude/monitor-status.json`、`~/.claude/monitor-debug.log`（及轮转产生的 `monitor-debug.log.1`）
+
+> 提示：ClaudeMonitor 在首次修改前会把原 `settings.json` 备份为 `~/.claude/settings.json.bak`。若想直接回滚配置改动，用它覆盖回去即可（注意这会一并丢弃备份之后的其它改动）。
+
+完成后**重启 Claude Code** 使改动生效。
 
 ## 打包
 

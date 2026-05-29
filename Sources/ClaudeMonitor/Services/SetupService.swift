@@ -1,45 +1,86 @@
 import Foundation
 
+/// Result of the first-launch auto-install, surfaced to the user via AppState/MenuBarPopover.
+struct SetupResult: Equatable {
+    enum Outcome { case ok, warning, failed }
+    let outcome: Outcome
+    let messages: [String]
+}
+
 struct SetupService {
     static let hookPort: UInt16 = 19806
     private static let hookURL = "http://127.0.0.1:\(hookPort)/hook"
 
-    static func installIfNeeded() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let claudeDir = "\(home)/.claude"
+    /// Installs the statusline wrapper and HTTP hooks into ~/.claude/settings.json.
+    /// Never silently no-ops: creates settings.json if missing, refuses to clobber an
+    /// invalid file, and returns a result the UI can show.
+    static func installIfNeeded() -> SetupResult {
+        let claudeDir = SettingsStore.claudeDir
 
-        installStatuslineWrapper(claudeDir: claudeDir)
-        installHooks(claudeDir: claudeDir)
+        do {
+            try SettingsStore.ensureExists()
+        } catch {
+            return SetupResult(outcome: .failed,
+                               messages: ["无法创建 ~/.claude/settings.json: \(error.localizedDescription)"])
+        }
+
+        var settings: [String: Any]
+        do {
+            settings = try SettingsStore.read()
+        } catch {
+            return SetupResult(outcome: .failed,
+                               messages: ["~/.claude/settings.json 不是合法 JSON，ClaudeMonitor 未做任何修改。请修复或删除该文件后重启。"])
+        }
+
+        var warnings: [String] = []
+        warnings += installStatuslineWrapper(claudeDir: claudeDir, settings: &settings)
+        installHooks(settings: &settings)
+
+        do {
+            try SettingsStore.write(settings)
+        } catch {
+            return SetupResult(outcome: .failed,
+                               messages: ["写入 settings.json 失败: \(error.localizedDescription)"])
+        }
+
+        return SetupResult(outcome: warnings.isEmpty ? .ok : .warning, messages: warnings)
     }
 
     static func uninstall() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let claudeDir = "\(home)/.claude"
-        restoreOriginalStatusline(claudeDir: claudeDir)
-        removeHooks(claudeDir: claudeDir)
+        let claudeDir = SettingsStore.claudeDir
+        guard var settings = try? SettingsStore.read() else { return }
+        restoreOriginalStatusline(claudeDir: claudeDir, settings: &settings)
+        removeHooks(settings: &settings)
+        try? SettingsStore.write(settings)
     }
 
-    private static func installStatuslineWrapper(claudeDir: String) {
-        let settingsPath = "\(claudeDir)/settings.json"
+    /// Wraps the existing statusline command so its JSON is tee'd to monitor-status.json.
+    /// Always installs the wrapper — even for users who never configured a statusline —
+    /// so the metrics channel works for everyone. Returns informational warnings.
+    private static func installStatuslineWrapper(claudeDir: String, settings: inout [String: Any]) -> [String] {
+        var warnings: [String] = []
         let wrapperPath = "\(claudeDir)/statusline-monitor.sh"
         let originalPath = "\(claudeDir)/statusline-command-original.sh"
 
-        guard let settingsData = FileManager.default.contents(atPath: settingsPath),
-              var settings = try? JSONSerialization.jsonObject(with: settingsData) as? [String: Any] else {
-            return
-        }
+        let existingCommand = (settings["statusLine"] as? [String: Any])?["command"] as? String
+        let alreadyWrapped = existingCommand?.contains("statusline-monitor") == true
 
-        if let statusLine = settings["statusLine"] as? [String: Any],
-           let currentCommand = statusLine["command"] as? String,
-           !currentCommand.contains("statusline-monitor") {
-            let originalContent: String
-            let originalScriptPath = "\(claudeDir)/statusline-command.sh"
-            if let data = FileManager.default.contents(atPath: originalScriptPath) {
-                originalContent = String(data: data, encoding: .utf8) ?? "#!/bin/bash\ncat"
+        if !alreadyWrapped {
+            if let existingCommand, !existingCommand.isEmpty {
+                // Preserve the prior statusline script's content so the wrapper can re-run it.
+                let originalScriptPath = "\(claudeDir)/statusline-command.sh"
+                let originalContent: String
+                if let data = FileManager.default.contents(atPath: originalScriptPath) {
+                    originalContent = String(data: data, encoding: .utf8) ?? "#!/bin/bash\ncat"
+                } else {
+                    originalContent = "#!/bin/bash\ncat"
+                }
+                try? originalContent.write(toFile: originalPath, atomically: true, encoding: .utf8)
             } else {
-                originalContent = "#!/bin/bash\ncat"
+                // Fresh user: no prior statusline. Don't write an -original.sh; the wrapper
+                // skips re-running when it's absent, just tee'ing input to monitor-status.json.
+                warnings.append("已安装监控 statusline（此前未配置 statusline）")
             }
-            try? originalContent.write(toFile: originalPath, atomically: true, encoding: .utf8)
         }
 
         let wrapperContent = """
@@ -64,16 +105,10 @@ struct SetupService {
             "command": "bash \(wrapperPath)"
         ] as [String: Any]
 
-        writeSettings(settings, to: settingsPath)
+        return warnings
     }
 
-    private static func installHooks(claudeDir: String) {
-        let settingsPath = "\(claudeDir)/settings.json"
-        guard let settingsData = FileManager.default.contents(atPath: settingsPath),
-              var settings = try? JSONSerialization.jsonObject(with: settingsData) as? [String: Any] else {
-            return
-        }
-
+    private static func installHooks(settings: inout [String: Any]) {
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
         let asyncHookEntry: [String: Any] = [
@@ -104,7 +139,6 @@ struct SetupService {
         }
 
         settings["hooks"] = hooks
-        writeSettings(settings, to: settingsPath)
     }
 
     private static func addHookIfMissing(hooks: [String: Any], event: String, hookEntry: [String: Any], tag: String) -> [String: Any] {
@@ -134,13 +168,8 @@ struct SetupService {
         return hooks
     }
 
-    private static func removeHooks(claudeDir: String) {
-        let settingsPath = "\(claudeDir)/settings.json"
-        guard let settingsData = FileManager.default.contents(atPath: settingsPath),
-              var settings = try? JSONSerialization.jsonObject(with: settingsData) as? [String: Any],
-              var hooks = settings["hooks"] as? [String: Any] else {
-            return
-        }
+    private static func removeHooks(settings: inout [String: Any]) {
+        guard var hooks = settings["hooks"] as? [String: Any] else { return }
 
         for (event, value) in hooks {
             guard var groups = value as? [[String: Any]] else { continue }
@@ -160,35 +189,20 @@ struct SetupService {
         }
 
         settings["hooks"] = hooks
-        writeSettings(settings, to: settingsPath)
     }
 
-    private static func restoreOriginalStatusline(claudeDir: String) {
-        let settingsPath = "\(claudeDir)/settings.json"
+    private static func restoreOriginalStatusline(claudeDir: String, settings: inout [String: Any]) {
         let originalPath = "\(claudeDir)/statusline-command-original.sh"
+        guard FileManager.default.fileExists(atPath: originalPath) else { return }
 
-        guard let settingsData = FileManager.default.contents(atPath: settingsPath),
-              var settings = try? JSONSerialization.jsonObject(with: settingsData) as? [String: Any] else {
-            return
-        }
+        let restoredScriptPath = "\(claudeDir)/statusline-command.sh"
+        settings["statusLine"] = [
+            "type": "command",
+            "command": "bash \(restoredScriptPath)"
+        ] as [String: Any]
 
-        if FileManager.default.fileExists(atPath: originalPath) {
-            settings["statusLine"] = [
-                "type": "command",
-                "command": "bash \(claudeDir)/statusline-command.sh"
-            ] as [String: Any]
-
-            try? FileManager.default.copyItem(atPath: originalPath, toPath: "\(claudeDir)/statusline-command.sh")
-            try? FileManager.default.removeItem(atPath: originalPath)
-        }
-
-        writeSettings(settings, to: settingsPath)
-    }
-
-    private static func writeSettings(_ settings: [String: Any], to path: String) {
-        guard let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else {
-            return
-        }
-        try? data.write(to: URL(fileURLWithPath: path))
+        try? FileManager.default.removeItem(atPath: restoredScriptPath)
+        try? FileManager.default.copyItem(atPath: originalPath, toPath: restoredScriptPath)
+        try? FileManager.default.removeItem(atPath: originalPath)
     }
 }

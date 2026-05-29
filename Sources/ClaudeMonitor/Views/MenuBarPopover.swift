@@ -23,6 +23,7 @@ struct MenuBarPopover: View {
         VStack(spacing: 0) {
             headerBar
             techDivider
+            setupBanner(failedOnly: true)
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 12) {
@@ -251,6 +252,7 @@ struct MenuBarPopover: View {
         VStack(spacing: 0) {
             headerBar
             techDivider
+            setupBanner(failedOnly: false)
             VStack(spacing: 16) {
                 ZStack {
                     Circle()
@@ -275,6 +277,39 @@ struct MenuBarPopover: View {
             .padding(.vertical, 50)
             techDivider
             footerBar
+        }
+    }
+
+    // MARK: - Setup Banner
+
+    @ViewBuilder
+    private func setupBanner(failedOnly: Bool) -> some View {
+        if let r = appState.setupResult, r.outcome != .ok, !(failedOnly && r.outcome != .failed) {
+            let accent: Color = r.outcome == .failed ? .techRed : .techOrange
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(accent)
+                    Text(r.outcome == .failed ? "SETUP FAILED" : "SETUP WARNING")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(accent)
+                        .kerning(1.5)
+                }
+                ForEach(r.messages, id: \.self) { msg in
+                    Text(msg)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(accent.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(accent.opacity(0.3), lineWidth: 0.5))
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
         }
     }
 
