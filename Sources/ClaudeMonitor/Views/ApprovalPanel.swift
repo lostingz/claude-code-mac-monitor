@@ -238,21 +238,25 @@ struct ApprovalPanelView: View {
     }
 
     private func addToAllowList(toolName: String, detail: String?) {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let settingsPath = "\(home)/.claude/settings.json"
-        guard let data = FileManager.default.contents(atPath: settingsPath),
-              var settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var permissions = settings["permissions"] as? [String: Any],
-              var allowList = permissions["allow"] as? [String] else { return }
+        do {
+            var settings = try SettingsStore.read()
+            // Create permissions / permissions.allow when absent so this never silently no-ops.
+            var permissions = settings["permissions"] as? [String: Any] ?? [:]
+            var allowList = permissions["allow"] as? [String] ?? []
 
-        let permission = detail.map { "\(toolName)(\(String($0.prefix(50))):*)" } ?? toolName
-        if !allowList.contains(permission) {
+            let permission = detail.map { "\(toolName)(\(String($0.prefix(50))):*)" } ?? toolName
+            guard !allowList.contains(permission) else { return }
+
             allowList.append(permission)
             permissions["allow"] = allowList
             settings["permissions"] = permissions
-            if let newData = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
-                try? newData.write(to: URL(fileURLWithPath: settingsPath))
-            }
+            try SettingsStore.write(settings)
+        } catch {
+            debugLog("[ApprovalPanel] addToAllowList failed: \(error)")
+            ClaudeMonitorApp.appState.setupResult = SetupResult(
+                outcome: .warning,
+                messages: ["无法把『始终允许』写入 settings.json: \(error.localizedDescription)"]
+            )
         }
     }
 }

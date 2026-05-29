@@ -67,7 +67,7 @@ struct PermissionDecision: Codable {
 }
 
 final class ApprovalRequest: Identifiable {
-    let id = UUID()
+    let id: UUID
     let toolName: String
     let toolInput: ToolInput?
     let sessionId: String
@@ -75,7 +75,8 @@ final class ApprovalRequest: Identifiable {
     private let _completion: (Bool) -> Void
     private var hasResponded = false
 
-    init(toolName: String, toolInput: ToolInput?, sessionId: String, timestamp: Date, completion: @escaping (Bool) -> Void) {
+    init(id: UUID = UUID(), toolName: String, toolInput: ToolInput?, sessionId: String, timestamp: Date, completion: @escaping (Bool) -> Void) {
+        self.id = id
         self.toolName = toolName
         self.toolInput = toolInput
         self.sessionId = sessionId

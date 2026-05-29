@@ -34,9 +34,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        SetupService.installIfNeeded()
-
         let state = ClaudeMonitorApp.appState
+        state.setupResult = SetupService.installIfNeeded()
 
         ClaudeMonitorApp.hookServer = HookServer(appState: state)
         ClaudeMonitorApp.hookServer.start()
@@ -115,7 +114,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = coloredImage
         }
 
-        button.toolTip = "Claude Code: \(state.status.label)"
+        if let setup = state.setupResult, setup.outcome == .failed, let first = setup.messages.first {
+            button.toolTip = "ClaudeMonitor 安装失败: \(first)"
+        } else {
+            button.toolTip = "Claude Code: \(state.status.label)"
+        }
     }
 
     @objc private func togglePopover() {
