@@ -84,6 +84,7 @@ echo ""
 echo "[4/4] Cleaning up..."
 rm -f "$CLAUDE_DIR/monitor-status.json"
 rm -f "$CLAUDE_DIR/monitor-debug.log"
+rm -f "$CLAUDE_DIR/monitor-debug.log.1"
 echo "  ✓ Temp files removed"
 
 APP_PATH="/Applications/ClaudeMonitor.app"

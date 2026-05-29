@@ -5,6 +5,12 @@ on:
     tags:
       - 'v*'
 
+# softprops/action-gh-release needs write access to create the release.
+# Without this the GITHUB_TOKEN defaults to read-only and the release step
+# fails with "Resource not accessible by integration".
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
